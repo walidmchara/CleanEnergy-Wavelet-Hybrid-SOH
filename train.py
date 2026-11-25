@@ -99,10 +99,21 @@ def run(args):
     cfg=json.loads(Path(__file__).with_name('config.json').read_text())
     for k in ['epochs','lookback','batch_size','hidden','seed']:
         if getattr(args,k,None) is not None:cfg[k]=getattr(args,k)
-    if args.smoke:df=demo_data(domain=cfg['domain'],seed=cfg['seed'])
-    elif args.csv:df=pd.read_csv(args.csv)
-    else:raise SystemExit('Provide --csv PATH for real data or --smoke for a synthetic test')
-    selected=args.features.split(',') if args.features else None
+    csv_path=None
+    if args.smoke:
+        df=demo_data(domain=cfg['domain'],seed=cfg['seed'])
+    else:
+        csv_path=Path(args.csv) if args.csv else Path(__file__).with_name('data')/'processed'/'nasa'/'B0005.csv'
+        if not csv_path.is_file():
+            raise SystemExit(f'Dataset not found: {csv_path}. Provide --csv PATH or use --smoke.')
+        df=pd.read_csv(csv_path)
+    if args.features:
+        selected=[name.strip() for name in args.features.split(',') if name.strip()]
+        if not selected:raise ValueError('--features must contain at least one column name')
+    elif csv_path is not None and csv_path.resolve()==(Path(__file__).with_name('data')/'processed'/'nasa'/'B0005.csv').resolve():
+        selected=['voltage_mean','voltage_std','current_mean','current_std','temperature_mean','discharge_duration_s']
+    else:
+        selected=None
     split,meta=prepare(df,cfg['lookback'],feature_cols=selected,target=args.target,time_col=args.time_col,clusters=cfg['n_clusters'],seed=cfg['seed'])
     if any(len(x[0])<1 for x in split.values()):raise ValueError('empty subset: reduce lookback or increase dataset')
     technique=(cfg['optimizer'] if args.search=='paper' else args.search)
@@ -120,11 +131,11 @@ def run(args):
             'warning':'CBO search is illustrative, not a verified implementation of paper equations' if technique=='cbo' else None}
     if args.resume and technique!='none':
         raise ValueError('Resume with hyperparameter search is not supported; use --search none')
-    source_signature = (hashlib.sha256(Path(args.csv).read_bytes()).hexdigest()
-                        if args.csv and not args.smoke else 'synthetic_smoke_seed_'+str(cfg['seed']))
+    source_signature = (hashlib.sha256(csv_path.read_bytes()).hexdigest()
+                        if csv_path is not None else 'synthetic_smoke_seed_'+str(cfg['seed']))
     recovery = EpochCheckpoint(args.checkpoint_dir or Path(args.out)/'recovery', {
         'training_config':cfg,'source_sha256':source_signature,'smoke':args.smoke,
-        'target':args.target,'time_col':args.time_col,'features':args.features,
+        'target':args.target,'time_col':args.time_col,'features':meta['features'],
         'search':technique,
     })
     net,history,_=train_one(split,meta,cfg,recovery=recovery,resume=args.resume)
@@ -160,7 +171,9 @@ def run(args):
 
 if __name__=='__main__':
     ap=argparse.ArgumentParser()
-    ap.add_argument('--csv');ap.add_argument('--smoke',action='store_true');ap.add_argument('--features',help='comma-separated feature column names; target is always appended')
+    ap.add_argument('--csv',help='input CSV (defaults to the bundled NASA B0005 cell)')
+    ap.add_argument('--smoke',action='store_true',help='use synthetic data for a quick software check')
+    ap.add_argument('--features',help='comma-separated feature column names; target history is always appended')
     ap.add_argument('--target',default='target');ap.add_argument('--time-col',default='time');ap.add_argument('--lookback',type=int)
     ap.add_argument('--epochs',type=int);ap.add_argument('--batch-size',type=int);ap.add_argument('--hidden',type=int);ap.add_argument('--seed',type=int)
     ap.add_argument('--search',choices=['paper','none','woa','cbo','optuna'],default='none',help='paper selects optimizer declared in associated paper')
